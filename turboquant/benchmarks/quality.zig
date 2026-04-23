@@ -149,6 +149,7 @@ pub fn main() void {
     var query_rng = std.Random.DefaultPrng.init(config.seed + 1000);
     for (0..config.num_queries) |_| {
         const q = generateUnitSphere(allocator, config.dim, &query_rng) catch unreachable;
+        var prepared_query = engine.prepareQuery(allocator, q) catch unreachable;
 
         for (0..config.n) |i| {
             true_scores[i] = .{
@@ -161,7 +162,7 @@ pub fn main() void {
         for (0..config.n) |i| {
             est_scores[i] = .{
                 .idx = i,
-                .score = engine.dot(q, db_compressed[i]),
+                .score = engine.dotPrepared(prepared_query, db_compressed[i]),
             };
             total_abs_dot_error += @abs(@as(f64, true_scores[i].score) - @as(f64, est_scores[i].score));
         }
@@ -172,6 +173,7 @@ pub fn main() void {
 
         total_recall += recallAtK(true_scores, est_scores, config.k);
         total_top1_in_topk += top1InTopK(true_scores, est_scores, config.k);
+        prepared_query.deinit(allocator);
         allocator.free(q);
     }
 

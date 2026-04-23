@@ -36,6 +36,11 @@ defer allocator.free(decoded);
 
 // Fast dot product without full decode
 const score = engine.dot(query_vector, compressed);
+
+// Precompute query transforms when scoring many compressed vectors
+var prepared = try engine.prepareQuery(allocator, query_vector);
+defer prepared.deinit(allocator);
+const batch_score = engine.dotPrepared(prepared, compressed);
 ```
 
 ## API
@@ -53,6 +58,8 @@ pub const Engine = struct {
     pub fn encode(e: *Engine, allocator: std.mem.Allocator, x: []const f32) ![]u8
     pub fn decode(e: *Engine, allocator: std.mem.Allocator, compressed: []const u8) ![]f32
     pub fn dot(e: *Engine, q: []const f32, compressed: []const u8) f32
+    pub fn prepareQuery(e: *const Engine, allocator: std.mem.Allocator, q: []const f32) !PreparedQuery
+    pub fn dotPrepared(e: *const Engine, query: PreparedQuery, compressed: []const u8) f32
 };
 ```
 
@@ -61,6 +68,29 @@ pub const Engine = struct {
 ![Performance](docs/assets/performance.png)
 
 At dim=1024: encode 2105µs, decode 1032µs, dot 997µs
+
+### Batch Search
+
+Use `dot` for one-off scores. For retrieval workloads, prepare the query once and reuse it:
+
+```zig
+var prepared = try engine.prepareQuery(allocator, query_vector);
+defer prepared.deinit(allocator);
+
+while (try cursor.next()) |compressed_vector| {
+    const score = engine.dotPrepared(prepared, compressed_vector);
+    // keep top-k results
+}
+```
+
+This avoids recomputing the query rotation and QJL projection for every stored vector. It is the intended path for RAG candidate scoring, LMDB/RocksDB-backed scans, and reranking batches returned by another index. The regular `dot` API remains useful for scoring a single compressed vector.
+
+Benchmark support:
+
+```bash
+zig build bench-engine -Doptimize=ReleaseFast -- dot 1024 10000 4
+zig build bench-engine -Doptimize=ReleaseFast -- prepared-dot 1024 10000 4
+```
 
 ## Compression
 

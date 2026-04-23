@@ -57,6 +57,11 @@ defer allocator.free(decoded);
 
 // Fast dot without decode
 const score = engine.dot(query_vector, compressed);
+
+// Reuse query transforms across many compressed vectors
+var prepared = try engine.prepareQuery(allocator, query_vector);
+defer prepared.deinit(allocator);
+const batch_score = engine.dotPrepared(prepared, compressed);
 ```
 
 ## API
@@ -66,12 +71,36 @@ const score = engine.dot(query_vector, compressed);
 - `engine.encode(allocator, vector)` - Compress vector
 - `engine.decode(allocator, compressed)` - Decompress
 - `engine.dot(query, compressed)` - Dot product without full decode
+- `engine.prepareQuery(allocator, query)` / `engine.dotPrepared(prepared, compressed)` - Reuse query transforms for batch scoring
 
 ## Performance
 
 ![Performance](docs/assets/performance.png)
 
 At dim=1024: encode 2105µs, decode 1032µs, dot 997µs
+
+### Batch Search
+
+Use `dot` for one-off scores. For retrieval workloads, prepare the query once and reuse it:
+
+```zig
+var prepared = try engine.prepareQuery(allocator, query_vector);
+defer prepared.deinit(allocator);
+
+while (try cursor.next()) |compressed_vector| {
+    const score = engine.dotPrepared(prepared, compressed_vector);
+    // keep top-k results
+}
+```
+
+This avoids recomputing the query rotation and QJL projection for every stored vector. It is the intended path for RAG candidate scoring, LMDB/RocksDB-backed scans, and reranking batches returned by another index.
+
+Benchmark support:
+
+```bash
+zig build bench-engine -Doptimize=ReleaseFast -- dot 1024 10000 4
+zig build bench-engine -Doptimize=ReleaseFast -- prepared-dot 1024 10000 4
+```
 
 ## Compression
 

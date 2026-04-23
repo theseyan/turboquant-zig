@@ -242,9 +242,15 @@ pub fn estimateDotWithWorkspace(
     if (dim == 0) return 0;
 
     projection.matVecMul(q, workspace.projected[0..dim]);
+    return estimateDotFromProjection(workspace.projected[0..dim], qjl_bits, gamma);
+}
+
+pub fn estimateDotFromProjection(projected_q: []const f32, qjl_bits: []const u8, gamma: f32) f32 {
+    const dim = projected_q.len;
+    if (dim == 0) return 0;
 
     var dot_sum: f32 = 0;
-    for (workspace.projected[0..dim], 0..) |value, i| {
+    for (projected_q, 0..) |value, i| {
         dot_sum += if (((qjl_bits[i / 8] >> @intCast(i % 8)) & 1) == 1) value else -value;
     }
 

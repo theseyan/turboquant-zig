@@ -28,6 +28,18 @@ pub const EngineConfig = struct {
     bits_per_dim: u8 = 4,
 };
 
+pub const PreparedQuery = struct {
+    dim: usize,
+    rotated: []f32,
+    qjl_projected: []f32,
+
+    pub fn deinit(query: *PreparedQuery, allocator: std.mem.Allocator) void {
+        allocator.free(query.rotated);
+        allocator.free(query.qjl_projected);
+        query.* = undefined;
+    }
+};
+
 const BufferCursor = struct {
     buffer: []u8,
     offset: usize = 0,
@@ -217,6 +229,45 @@ pub const Engine = struct {
         return header.vector_norm * (mse_dot + qjl_dot);
     }
 
+    pub fn prepareQuery(e: *const Engine, allocator: std.mem.Allocator, q: []const f32) !PreparedQuery {
+        if (q.len != e.dim) return EncodeError.InvalidDimension;
+
+        const rotated = try allocator.alloc(f32, e.dim);
+        errdefer allocator.free(rotated);
+
+        const qjl_projected = try allocator.alloc(f32, e.dim);
+        errdefer allocator.free(qjl_projected);
+
+        e.prepareQueryInto(rotated, qjl_projected, q);
+        return .{
+            .dim = e.dim,
+            .rotated = rotated,
+            .qjl_projected = qjl_projected,
+        };
+    }
+
+    pub fn prepareQueryInto(e: *const Engine, rotated: []f32, qjl_projected: []f32, q: []const f32) void {
+        std.debug.assert(q.len == e.dim);
+        std.debug.assert(rotated.len >= e.dim);
+        std.debug.assert(qjl_projected.len >= e.dim);
+
+        e.rotation_op.matVecMul(q, rotated[0..e.dim]);
+        e.qjl_projection.matVecMul(q, qjl_projected[0..e.dim]);
+    }
+
+    pub fn dotPrepared(e: *const Engine, query: PreparedQuery, compressed: []const u8) f32 {
+        if (query.dim != e.dim or query.rotated.len < e.dim or query.qjl_projected.len < e.dim) return 0;
+
+        const header = format.readHeader(compressed) catch return 0;
+        e.validateHeader(header) catch return 0;
+        if (header.vector_norm == 0) return 0;
+
+        const payload = format.slicePayload(compressed, header) catch return 0;
+        const mse_dot = scalar.dotProduct(query.rotated[0..e.dim], payload.scalar, &e.codebook, e.coord_scale) catch return 0;
+        const qjl_dot = qjl.estimateDotFromProjection(query.qjl_projected[0..e.dim], payload.qjl, header.gamma);
+        return header.vector_norm * (mse_dot + qjl_dot);
+    }
+
     fn encodeZeroVectorInto(e: *const Engine, out: []u8) void {
         std.debug.assert(out.len >= e.compressedLen());
         @memset(out[0..e.compressedLen()], 0);
@@ -389,6 +440,31 @@ test "dot matches decoded-space dot" {
 
     const direct_dot = engine.dot(&qv, &compressed);
     try std.testing.expectApproxEqAbs(decoded_dot, direct_dot, @abs(decoded_dot) * 1e-4 + 1e-4);
+}
+
+test "prepared query dot matches regular dot" {
+    const allocator = std.testing.allocator;
+    const dim: usize = 64;
+    const compressed_len = format.HEADER_SIZE + ((dim * 3 + 7) / 8) + ((dim + 7) / 8);
+
+    var engine = try Engine.init(allocator, .{ .dim = dim, .seed = 2468, .bits_per_dim = 4 });
+    defer engine.deinit(allocator);
+
+    var rng = std.Random.DefaultPrng.init(2468);
+    const random = rng.random();
+
+    var x: [dim]f32 = undefined;
+    var qv: [dim]f32 = undefined;
+    for (&x) |*value| value.* = random.float(f32) * 2 - 1;
+    for (&qv) |*value| value.* = random.float(f32) * 2 - 1;
+
+    var compressed: [compressed_len]u8 = undefined;
+    try engine.encodeInto(&compressed, &x);
+
+    var prepared = try engine.prepareQuery(allocator, &qv);
+    defer prepared.deinit(allocator);
+
+    try std.testing.expectApproxEqAbs(engine.dot(&qv, &compressed), engine.dotPrepared(prepared, &compressed), 1e-5);
 }
 
 test "zero vector encodes and decodes safely" {

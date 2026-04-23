@@ -13,6 +13,7 @@ const Operation = enum {
     encode,
     decode,
     dot,
+    prepared_dot,
     compression,
     all,
 };
@@ -29,7 +30,7 @@ fn parseArgs(args: []const [:0]u8) BenchError!Config {
     if (args.len < 2) return BenchError.MissingArgs;
 
     const op_str = std.mem.sliceTo(args[1], 0);
-    const op: Operation = if (std.mem.eql(u8, op_str, "encode")) .encode else if (std.mem.eql(u8, op_str, "decode")) .decode else if (std.mem.eql(u8, op_str, "dot")) .dot else if (std.mem.eql(u8, op_str, "compression")) .compression else if (std.mem.eql(u8, op_str, "all")) .all else return BenchError.InvalidOp;
+    const op: Operation = if (std.mem.eql(u8, op_str, "encode")) .encode else if (std.mem.eql(u8, op_str, "decode")) .decode else if (std.mem.eql(u8, op_str, "dot")) .dot else if (std.mem.eql(u8, op_str, "prepared-dot")) .prepared_dot else if (std.mem.eql(u8, op_str, "compression")) .compression else if (std.mem.eql(u8, op_str, "all")) .all else return BenchError.InvalidOp;
 
     var dim: usize = 128;
     var iterations: usize = 100;
@@ -134,6 +135,32 @@ fn runDot(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_per_
     return total_ns / iterations;
 }
 
+fn runPreparedDot(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
+    var engine = try turboquant.Engine.init(allocator, .{ .dim = dim, .seed = seed, .bits_per_dim = bits_per_dim });
+    defer engine.deinit(allocator);
+
+    const data = try generateVector(allocator, dim, seed);
+    defer allocator.free(data);
+
+    const query = try generateVector(allocator, dim, seed + 1);
+    defer allocator.free(query);
+
+    const compressed = try allocator.alloc(u8, engine.compressedLen());
+    defer allocator.free(compressed);
+    try engine.encodeInto(compressed, data);
+
+    var prepared = try engine.prepareQuery(allocator, query);
+    defer prepared.deinit(allocator);
+
+    var total_ns: u64 = 0;
+    for (0..iterations) |_| {
+        var timer = try std.time.Timer.start();
+        _ = engine.dotPrepared(prepared, compressed);
+        total_ns += timer.read();
+    }
+    return total_ns / iterations;
+}
+
 fn runCompression(allocator: std.mem.Allocator, dim: usize, bits_per_dim: u8, seed: u32) !void {
     var engine = try turboquant.Engine.init(allocator, .{ .dim = dim, .seed = seed, .bits_per_dim = bits_per_dim });
     defer engine.deinit(allocator);
@@ -163,7 +190,7 @@ pub fn main() void {
         switch (err) {
             BenchError.MissingArgs => {
                 std.debug.print("Usage: bench <op> [dim] [iterations] [bits_per_dim]\n", .{});
-                std.debug.print("  op: encode, decode, dot, compression, all\n", .{});
+                std.debug.print("  op: encode, decode, dot, prepared-dot, compression, all\n", .{});
             },
             BenchError.InvalidOp => std.debug.print("error: invalid operation\n", .{}),
             BenchError.InvalidDim => std.debug.print("error: invalid dimension\n", .{}),
@@ -194,6 +221,13 @@ pub fn main() void {
                 return;
             };
             std.debug.print("dot/dim={d}/bpd={d}: {d} ns/op\n", .{ config.dim, config.bits_per_dim, ns });
+        },
+        .prepared_dot => {
+            const ns = runPreparedDot(allocator, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
+                std.debug.print("error: benchmark failed\n", .{});
+                return;
+            };
+            std.debug.print("prepared-dot/dim={d}/bpd={d}: {d} ns/op\n", .{ config.dim, config.bits_per_dim, ns });
         },
         .compression => {
             const dims = [_]usize{ 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 };
@@ -231,6 +265,14 @@ pub fn main() void {
             std.debug.print("------|------------\n", .{});
             for (dims) |dim| {
                 const ns = runDot(allocator, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
+                std.debug.print("{d:>4} | {d:>12}\n", .{ dim, ns });
+            }
+
+            std.debug.print("\n=== PREPARED DOT BENCHMARK ===\n", .{});
+            std.debug.print("{s:>4} | {s:>12}\n", .{ "dim", "ns/op" });
+            std.debug.print("------|------------\n", .{});
+            for (dims) |dim| {
+                const ns = runPreparedDot(allocator, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
                 std.debug.print("{d:>4} | {d:>12}\n", .{ dim, ns });
             }
 
