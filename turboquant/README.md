@@ -40,7 +40,11 @@ Or use the latest version from the main branch:
 const turboquant = @import("turboquant");
 
 // Create an engine for repeated operations
-var engine = try turboquant.Engine.init(allocator, .{ .dim = 1024, .seed = 12345 });
+var engine = try turboquant.Engine.init(allocator, .{
+    .dim = 1024,
+    .seed = 12345,
+    .bits_per_dim = 4,
+});
 defer engine.deinit(allocator);
 
 // Encode
@@ -57,7 +61,7 @@ const score = engine.dot(query_vector, compressed);
 
 ## API
 
-- `Engine.init(allocator, .{ .dim, .seed })` - Create engine
+- `Engine.init(allocator, .{ .dim, .seed, .bits_per_dim })` - Create engine
 - `engine.deinit(allocator)` - Destroy engine
 - `engine.encode(allocator, vector)` - Compress vector
 - `engine.decode(allocator, compressed)` - Decompress
@@ -76,13 +80,14 @@ At dim=1024: encode 2105µs, decode 1032µs, dot 997µs
 ![Bits per Dimension](docs/assets/bits-per-dimension.png)
 
 - ~6x compression ratio at dim=1024
-- ~3 bits/dim
+- Configurable payload bitrate with 1-bit QJL residual correction
 
 ## Building
 
 ```bash
 cd turboquant
-zig build-exe -O ReleaseFast -target aarch64-macos src/profile.zig
+zig build test
+zig build quality -- <dim> [N] [k] [num_queries] [bits_per_dim]
 ```
 
 ## License

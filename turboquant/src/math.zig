@@ -8,23 +8,29 @@ inline fn dotVec(a: @Vector(LANE_COUNT, f32), b: @Vector(LANE_COUNT, f32)) f32 {
 
 pub fn dot(a: []const f32, b: []const f32) f32 {
     std.debug.assert(a.len == b.len);
-    const len = a.len;
 
-    var sum_vec: @Vector(LANE_COUNT, f32) = @splat(0);
-
+    var acc0: @Vector(LANE_COUNT, f32) = @splat(0);
+    var acc1: @Vector(LANE_COUNT, f32) = @splat(0);
     var i: usize = 0;
-    while (i + LANE_COUNT <= len) : (i += LANE_COUNT) {
-        const av = a[i..][0..LANE_COUNT];
-        const bv = b[i..][0..LANE_COUNT];
-        sum_vec += @as(@Vector(LANE_COUNT, f32), av[0..LANE_COUNT].*) * @as(@Vector(LANE_COUNT, f32), bv[0..LANE_COUNT].*);
+    while (i + 2 * LANE_COUNT <= a.len) : (i += 2 * LANE_COUNT) {
+        const a0: @Vector(LANE_COUNT, f32) = a[i..][0..LANE_COUNT].*;
+        const b0: @Vector(LANE_COUNT, f32) = b[i..][0..LANE_COUNT].*;
+        const a1: @Vector(LANE_COUNT, f32) = a[i + LANE_COUNT ..][0..LANE_COUNT].*;
+        const b1: @Vector(LANE_COUNT, f32) = b[i + LANE_COUNT ..][0..LANE_COUNT].*;
+        acc0 += a0 * b0;
+        acc1 += a1 * b1;
+    }
+    while (i + LANE_COUNT <= a.len) : (i += LANE_COUNT) {
+        const av: @Vector(LANE_COUNT, f32) = a[i..][0..LANE_COUNT].*;
+        const bv: @Vector(LANE_COUNT, f32) = b[i..][0..LANE_COUNT].*;
+        acc0 += av * bv;
     }
 
-    var total = dotVec(sum_vec, @splat(1));
-
-    while (i < len) : (i += 1) {
-        total += a[i] * b[i];
+    var sum = @reduce(.Add, acc0 + acc1);
+    while (i < a.len) : (i += 1) {
+        sum += a[i] * b[i];
     }
-    return total;
+    return sum;
 }
 
 pub fn norm(x: []const f32) f32 {
@@ -32,16 +38,14 @@ pub fn norm(x: []const f32) f32 {
 }
 
 pub fn scale(v: []f32, s: f32) void {
-    const len = v.len;
     const s_vec: @Vector(LANE_COUNT, f32) = @splat(s);
 
     var i: usize = 0;
-    while (i + LANE_COUNT <= len) : (i += LANE_COUNT) {
+    while (i + LANE_COUNT <= v.len) : (i += LANE_COUNT) {
         const vv: @Vector(LANE_COUNT, f32) = v[i..][0..LANE_COUNT].*;
         @as(*[LANE_COUNT]f32, @ptrCast(v[i..])).* = vv * s_vec;
     }
-
-    while (i < len) : (i += 1) {
+    while (i < v.len) : (i += 1) {
         v[i] *= s;
     }
 }
@@ -49,36 +53,21 @@ pub fn scale(v: []f32, s: f32) void {
 pub fn addScaled(out: []f32, a: []const f32, b: []const f32, scale_b: f32) void {
     std.debug.assert(out.len == a.len);
     std.debug.assert(a.len == b.len);
-    const len = a.len;
-    const sb_vec: @Vector(LANE_COUNT, f32) = @splat(scale_b);
 
+    const scale_vec: @Vector(LANE_COUNT, f32) = @splat(scale_b);
     var i: usize = 0;
-    while (i + LANE_COUNT <= len) : (i += LANE_COUNT) {
+    while (i + LANE_COUNT <= out.len) : (i += LANE_COUNT) {
         const av: @Vector(LANE_COUNT, f32) = a[i..][0..LANE_COUNT].*;
         const bv: @Vector(LANE_COUNT, f32) = b[i..][0..LANE_COUNT].*;
-        @as(*[LANE_COUNT]f32, @ptrCast(out[i..])).* = av + bv * sb_vec;
+        @as(*[LANE_COUNT]f32, @ptrCast(out[i..])).* = av + bv * scale_vec;
     }
-
-    while (i < len) : (i += 1) {
+    while (i < out.len) : (i += 1) {
         out[i] = a[i] + b[i] * scale_b;
     }
 }
 
 pub fn sub(a: []const f32, b: []const f32, out: []f32) void {
-    std.debug.assert(out.len == a.len);
-    std.debug.assert(a.len == b.len);
-    const len = a.len;
-
-    var i: usize = 0;
-    while (i + LANE_COUNT <= len) : (i += LANE_COUNT) {
-        const av: @Vector(LANE_COUNT, f32) = a[i..][0..LANE_COUNT].*;
-        const bv: @Vector(LANE_COUNT, f32) = b[i..][0..LANE_COUNT].*;
-        @as(*[LANE_COUNT]f32, @ptrCast(out[i..])).* = av - bv;
-    }
-
-    while (i < len) : (i += 1) {
-        out[i] = a[i] - b[i];
-    }
+    addScaled(out, a, b, -1.0);
 }
 
 pub fn copy(src: []const f32, dst: []f32) void {
@@ -92,16 +81,14 @@ pub fn zero(v: []f32) void {
 
 pub fn addInPlace(a: []f32, b: []const f32) void {
     std.debug.assert(a.len == b.len);
-    const len = a.len;
 
     var i: usize = 0;
-    while (i + LANE_COUNT <= len) : (i += LANE_COUNT) {
+    while (i + LANE_COUNT <= a.len) : (i += LANE_COUNT) {
         const av: @Vector(LANE_COUNT, f32) = a[i..][0..LANE_COUNT].*;
         const bv: @Vector(LANE_COUNT, f32) = b[i..][0..LANE_COUNT].*;
         @as(*[LANE_COUNT]f32, @ptrCast(a[i..])).* = av + bv;
     }
-
-    while (i < len) : (i += 1) {
+    while (i < a.len) : (i += 1) {
         a[i] += b[i];
     }
 }

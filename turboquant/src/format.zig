@@ -9,120 +9,127 @@ pub const FormatError = error{
 pub const Header = packed struct {
     version: u8,
     dim: u32,
-    reserved: u8,
-    polar_bytes: u32,
+    bits_per_dim: u8,
+    scalar_bytes: u32,
     qjl_bytes: u32,
-    max_r: f32,
+    vector_norm: f32,
     gamma: f32,
 };
 
-pub const PAYLOAD_VERSION: u8 = 1;
+pub const PAYLOAD_VERSION: u8 = 2;
 pub const HEADER_SIZE: usize = @sizeOf(Header);
 
 pub fn writeHeader(
     out: []u8,
     dim: u32,
-    polar_bytes: u32,
+    bits_per_dim: u8,
+    scalar_bytes: u32,
     qjl_bytes: u32,
-    max_r: f32,
+    vector_norm: f32,
     gamma: f32,
 ) void {
     std.debug.assert(out.len >= HEADER_SIZE);
+
     out[0] = PAYLOAD_VERSION;
     std.mem.writeInt(u32, out[1..5], dim, .little);
-    out[5] = 0;
-    std.mem.writeInt(u32, out[6..10], polar_bytes, .little);
+    out[5] = bits_per_dim;
+    std.mem.writeInt(u32, out[6..10], scalar_bytes, .little);
     std.mem.writeInt(u32, out[10..14], qjl_bytes, .little);
-    const max_r_bits: u32 = @bitCast(max_r);
-    std.mem.writeInt(u32, out[14..18], max_r_bits, .little);
-    const gamma_bits: u32 = @bitCast(gamma);
-    std.mem.writeInt(u32, out[18..22], gamma_bits, .little);
+    std.mem.writeInt(u32, out[14..18], @bitCast(vector_norm), .little);
+    std.mem.writeInt(u32, out[18..22], @bitCast(gamma), .little);
 }
 
 pub fn readHeader(data: []const u8) FormatError!Header {
     if (data.len < HEADER_SIZE) return FormatError.InvalidHeader;
     if (data[0] != PAYLOAD_VERSION) return FormatError.InvalidHeader;
-    if (data[5] != 0) return FormatError.InvalidHeader;
+    if (data[5] > 8) return FormatError.InvalidHeader;
 
     const dim = std.mem.readInt(u32, data[1..5], .little);
-    const polar_bytes = std.mem.readInt(u32, data[6..10], .little);
+    const scalar_bytes = std.mem.readInt(u32, data[6..10], .little);
     const qjl_bytes = std.mem.readInt(u32, data[10..14], .little);
-    const max_r_bits = std.mem.readInt(u32, data[14..18], .little);
-    const max_r: f32 = @bitCast(max_r_bits);
-    const gamma_bits = std.mem.readInt(u32, data[18..22], .little);
-    const gamma: f32 = @bitCast(gamma_bits);
+    const vector_norm: f32 = @bitCast(std.mem.readInt(u32, data[14..18], .little));
+    const gamma: f32 = @bitCast(std.mem.readInt(u32, data[18..22], .little));
 
-    return Header{
+    if (!std.math.isFinite(vector_norm) or !std.math.isFinite(gamma) or vector_norm < 0 or gamma < 0) {
+        return FormatError.InvalidHeader;
+    }
+
+    return .{
         .version = data[0],
         .dim = dim,
-        .reserved = 0,
-        .polar_bytes = polar_bytes,
+        .bits_per_dim = data[5],
+        .scalar_bytes = scalar_bytes,
         .qjl_bytes = qjl_bytes,
-        .max_r = max_r,
+        .vector_norm = vector_norm,
         .gamma = gamma,
     };
 }
 
-pub fn slicePayload(data: []const u8, header: Header) FormatError!struct { polar: []const u8, qjl: []const u8 } {
+pub fn slicePayload(data: []const u8, header: Header) FormatError!struct { scalar: []const u8, qjl: []const u8 } {
     const payload_start = HEADER_SIZE;
-    const payload_end = payload_start + header.polar_bytes + header.qjl_bytes;
-    if (data.len < payload_end) return FormatError.InvalidPayload;
+    const payload_end = payload_start + header.scalar_bytes + header.qjl_bytes;
+    if (payload_end < payload_start or data.len < payload_end) return FormatError.InvalidPayload;
 
     return .{
-        .polar = data[payload_start .. payload_start + header.polar_bytes],
-        .qjl = data[payload_start + header.polar_bytes .. payload_end],
+        .scalar = data[payload_start .. payload_start + header.scalar_bytes],
+        .qjl = data[payload_start + header.scalar_bytes .. payload_end],
     };
 }
 
 test "header roundtrip" {
     const dim: u32 = 128;
-    const polar_bytes: u32 = 48;
+    const bits_per_dim: u8 = 4;
+    const scalar_bytes: u32 = 64;
     const qjl_bytes: u32 = 16;
-    const max_r: f32 = 2.5;
-    const gamma: f32 = 3.14159;
+    const vector_norm: f32 = 2.5;
+    const gamma: f32 = 0.125;
 
     var buf: [HEADER_SIZE]u8 = undefined;
-    writeHeader(&buf, dim, polar_bytes, qjl_bytes, max_r, gamma);
+    writeHeader(&buf, dim, bits_per_dim, scalar_bytes, qjl_bytes, vector_norm, gamma);
 
     const header = try readHeader(&buf);
     try std.testing.expectEqual(dim, header.dim);
-    try std.testing.expectEqual(polar_bytes, header.polar_bytes);
+    try std.testing.expectEqual(bits_per_dim, header.bits_per_dim);
+    try std.testing.expectEqual(scalar_bytes, header.scalar_bytes);
     try std.testing.expectEqual(qjl_bytes, header.qjl_bytes);
-    try std.testing.expectEqual(max_r, header.max_r);
+    try std.testing.expectEqual(vector_norm, header.vector_norm);
     try std.testing.expectEqual(gamma, header.gamma);
-    try std.testing.expectEqual(@as(u8, 1), header.version);
+    try std.testing.expectEqual(PAYLOAD_VERSION, header.version);
 }
 
 test "reject short header" {
-    const bad: [5]u8 = .{ 1, 0, 0, 0, 0 };
+    const bad: [5]u8 = .{ PAYLOAD_VERSION, 0, 0, 0, 0 };
     const result = readHeader(&bad);
     try std.testing.expectError(FormatError.InvalidHeader, result);
 }
 
 test "reject wrong version" {
     var buf: [HEADER_SIZE]u8 = undefined;
+    @memset(&buf, 0);
     buf[0] = 99;
+
     const result = readHeader(&buf);
     try std.testing.expectError(FormatError.InvalidHeader, result);
 }
 
-test "reject nonzero reserved byte" {
+test "reject invalid bit width" {
     var buf: [HEADER_SIZE]u8 = undefined;
-    buf[0] = 1;
-    buf[5] = 1;
+    @memset(&buf, 0);
+    buf[0] = PAYLOAD_VERSION;
+    buf[5] = 9;
+
     const result = readHeader(&buf);
     try std.testing.expectError(FormatError.InvalidHeader, result);
 }
 
 test "payload slicing" {
     const dim: u32 = 8;
-    const polar_bytes: u32 = 3;
+    const bits_per_dim: u8 = 3;
+    const scalar_bytes: u32 = 3;
     const qjl_bytes: u32 = 1;
-    const max_r: f32 = 1.0;
-    const gamma: f32 = 0.5;
 
-    var buf: [HEADER_SIZE + polar_bytes + qjl_bytes]u8 = undefined;
-    writeHeader(&buf, dim, polar_bytes, qjl_bytes, max_r, gamma);
+    var buf: [HEADER_SIZE + scalar_bytes + qjl_bytes]u8 = undefined;
+    writeHeader(&buf, dim, bits_per_dim, scalar_bytes, qjl_bytes, 1.0, 0.5);
     buf[HEADER_SIZE] = 0xAA;
     buf[HEADER_SIZE + 1] = 0xBB;
     buf[HEADER_SIZE + 2] = 0xCC;
@@ -131,15 +138,16 @@ test "payload slicing" {
     const header = try readHeader(&buf);
     const payload = try slicePayload(&buf, header);
 
-    try std.testing.expectEqual(@as(usize, 3), payload.polar.len);
+    try std.testing.expectEqual(@as(usize, 3), payload.scalar.len);
     try std.testing.expectEqual(@as(usize, 1), payload.qjl.len);
-    try std.testing.expectEqual(@as(u8, 0xAA), payload.polar[0]);
+    try std.testing.expectEqual(@as(u8, 0xAA), payload.scalar[0]);
     try std.testing.expectEqual(@as(u8, 0xDD), payload.qjl[0]);
 }
 
 test "reject truncated payload" {
-    var buf: [130]u8 = undefined;
-    writeHeader(&buf, 8, 100, 1, 1.0, 0.5);
+    var buf: [HEADER_SIZE + 8]u8 = undefined;
+    writeHeader(&buf, 8, 3, 100, 1, 1.0, 0.5);
+
     const header = try readHeader(&buf);
     const result = slicePayload(&buf, header);
     try std.testing.expectError(FormatError.InvalidPayload, result);

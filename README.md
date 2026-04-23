@@ -6,7 +6,8 @@ A Zig implementation of Google's TurboQuant vector compression library based on 
 
 ## Features
 
-- **3 bits/dim compression** - Near 6x compression ratio for typical vectors
+- **Paper-aligned codec** - random rotation + Lloyd-Max scalar quantization + QJL residual
+- **Configurable bitwidth** - set `bits_per_dim` per engine instance
 - **Fast dot product** - Estimate inner products without full decode
 - **QJL** - Quantized Johnson-Lindenstrauss for unbiased inner product estimation
 - **SIMD optimized** - Uses Zig's portable `@Vector` for ARM64 NEON
@@ -18,7 +19,11 @@ A Zig implementation of Google's TurboQuant vector compression library based on 
 const turboquant = @import("turboquant");
 
 // Create an engine for repeated operations
-var engine = try turboquant.Engine.init(allocator, .{ .dim = 1024, .seed = 12345 });
+var engine = try turboquant.Engine.init(allocator, .{
+    .dim = 1024,
+    .seed = 12345,
+    .bits_per_dim = 4,
+});
 defer engine.deinit(allocator);
 
 // Encode a vector
@@ -39,6 +44,7 @@ const score = engine.dot(query_vector, compressed);
 pub const EngineConfig = struct {
     dim: usize,
     seed: u32,
+    bits_per_dim: u8 = 4,
 };
 
 pub const Engine = struct {
@@ -66,28 +72,28 @@ At dim=1024: encode 2105µs, decode 1032µs, dot 997µs
 
 ![MSE Distortion](docs/assets/mse-distortion.png)
 
-Full (polar+QJL) MSE well below paper's theoretical bound, improving with dimension.
+TurboQuant reconstructs in the original basis and uses a separate QJL residual stage for dot estimation.
 
 ![Recall@k](docs/assets/recall-at-k.png)
 
-Near-perfect recall@10 across all dimensions (N=1000 database, 50 queries).
+Run `zig build quality -- <dim> [N] [k] [num_queries] [bits_per_dim]` to measure top-k intersection recall and top-1-in-top-k for the current build.
 
 ![Component Analysis](docs/assets/component-analysis.png)
 
-QJL residual encoding reduces MSE by 6-16% over polar-only quantization.
+The residual stage corrects the scalar-quantizer bias for inner-product estimation.
 
 ![Dot Product Error](docs/assets/dot-product-error.png)
 
-Inner product distortion decreases with dimension, with QJL consistently outperforming polar-only.
+Inner-product error decreases with dimension, with QJL keeping the estimator unbiased.
 
 ## Building
 
 ```bash
 cd turboquant
-zig build-exe -O ReleaseFast -target aarch64-macos-none src/profile.zig
+zig build test
 
 # Run quality benchmarks
-zig build quality -- <dim> [N] [k] [num_queries]
+zig build quality -- <dim> [N] [k] [num_queries] [bits_per_dim]
 ```
 
 ## Binary Format
@@ -96,14 +102,14 @@ zig build quality -- <dim> [N] [k] [num_queries]
 Header (22 bytes):
 - version: u8
 - dim: u32
-- reserved: u8
-- polar_bytes: u32
+- bits_per_dim: u8
+- scalar_bytes: u32
 - qjl_bytes: u32
-- max_r: f32
+- vector_norm: f32
 - gamma: f32
 
 Payload:
-- polar encoded data (variable)
+- scalar quantizer indices (variable)
 - qjl encoded data (variable)
 ```
 
