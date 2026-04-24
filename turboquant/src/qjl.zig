@@ -10,6 +10,11 @@ pub const QjlError = error{
 const SQRT_PI_OVER_2: f32 = 1.2533141373155003;
 const LANE_COUNT = std.simd.suggestVectorLength(f32) orelse 4;
 
+pub const ProjectionKind = enum {
+    dense,
+    hadamard,
+};
+
 fn randGaussian(random: std.Random) f32 {
     const v1 = @max(random.float(f32), std.math.floatMin(f32));
     const v2 = random.float(f32);
@@ -65,6 +70,70 @@ fn matVecKernel(matrix: []const f32, input: []const f32, output: []f32, dim: usi
     }
 }
 
+fn useHadamardProjection(dim: usize) bool {
+    return dim != 0 and (dim & (dim - 1)) == 0;
+}
+
+fn splitMix64(value: u64) u64 {
+    var z = value +% 0x9E3779B97F4A7C15;
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+    return z ^ (z >> 31);
+}
+
+fn diagonalSign(seed: u32, index: usize) f32 {
+    const mixed = splitMix64((@as(u64, seed) << 32) ^ @as(u64, @intCast(index)));
+    return if ((mixed & 1) == 0) 1 else -1;
+}
+
+fn hadamardSign(row: usize, col: usize) f32 {
+    return if ((@popCount(row & col) & 1) == 0) 1 else -1;
+}
+
+fn fastHadamardTransform(values: []f32) void {
+    var step: usize = 1;
+    while (step < values.len) : (step *= 2) {
+        var block: usize = 0;
+        while (block < values.len) : (block += step * 2) {
+            for (0..step) |offset| {
+                const a = values[block + offset];
+                const b = values[block + offset + step];
+                values[block + offset] = a + b;
+                values[block + offset + step] = a - b;
+            }
+        }
+    }
+}
+
+fn hadamardMatVec(seed: u32, input: []const f32, output: []f32) void {
+    for (input, output, 0..) |value, *dst, i| {
+        dst.* = diagonalSign(seed, i) * value;
+    }
+    fastHadamardTransform(output);
+}
+
+fn hadamardMatVecTransposed(seed: u32, input: []const f32, output: []f32) void {
+    @memcpy(output, input);
+    fastHadamardTransform(output);
+    for (output, 0..) |*value, i| {
+        value.* *= diagonalSign(seed, i);
+    }
+}
+
+fn hadamardDecodeAddInto(out: []f32, qjl_bits: []const u8, gamma: f32, seed: u32) void {
+    const dim = out.len;
+    const scale = SQRT_PI_OVER_2 * gamma / @as(f32, @floatFromInt(dim));
+    for (out, 0..) |*dst, col| {
+        var sum: f32 = 0;
+        for (0..dim) |row| {
+            const bit = (qjl_bits[row / 8] >> @intCast(row % 8)) & 1;
+            const qjl_sign: f32 = if (bit == 1) scale else -scale;
+            sum += qjl_sign * hadamardSign(row, col);
+        }
+        dst.* += sum * diagonalSign(seed, col);
+    }
+}
+
 pub const Workspace = struct {
     projected: []f32,
 
@@ -90,14 +159,16 @@ pub const Workspace = struct {
 pub const ProjectionOperator = struct {
     dim: usize,
     seed: u32,
+    kind: ProjectionKind,
     matrix: []f32,
     matrix_t: []f32,
 
     pub fn prepare(allocator: std.mem.Allocator, dim: usize, seed: u32) QjlError!ProjectionOperator {
-        const matrix = try allocator.alloc(f32, dim * dim);
+        const matrix_words = if (useHadamardProjection(dim)) 0 else dim * dim;
+        const matrix = try allocator.alloc(f32, matrix_words);
         errdefer allocator.free(matrix);
 
-        const matrix_t = try allocator.alloc(f32, dim * dim);
+        const matrix_t = try allocator.alloc(f32, matrix_words);
         errdefer allocator.free(matrix_t);
 
         return prepareInto(matrix, matrix_t, dim, seed);
@@ -109,6 +180,16 @@ pub const ProjectionOperator = struct {
         dim: usize,
         seed: u32,
     ) QjlError!ProjectionOperator {
+        if (useHadamardProjection(dim)) {
+            return .{
+                .dim = dim,
+                .seed = seed,
+                .kind = .hadamard,
+                .matrix = matrix[0..0],
+                .matrix_t = matrix_t[0..0],
+            };
+        }
+
         if (matrix.len < dim * dim or matrix_t.len < dim * dim) return QjlError.BufferTooSmall;
 
         const matrix_view = matrix[0 .. dim * dim];
@@ -131,12 +212,14 @@ pub const ProjectionOperator = struct {
         return .{
             .dim = dim,
             .seed = seed,
+            .kind = .dense,
             .matrix = matrix_view,
             .matrix_t = matrix_t_view,
         };
     }
 
     pub fn requiredStorageSize(dim: usize) usize {
+        if (useHadamardProjection(dim)) return 0;
         return 2 * dim * dim * @sizeOf(f32);
     }
 
@@ -149,13 +232,19 @@ pub const ProjectionOperator = struct {
     pub fn matVecMul(op: *const ProjectionOperator, input: []const f32, output: []f32) void {
         const dim = op.dim;
         std.debug.assert(input.len == dim and output.len == dim);
-        matVecKernel(op.matrix, input, output, dim);
+        switch (op.kind) {
+            .dense => matVecKernel(op.matrix, input, output, dim),
+            .hadamard => hadamardMatVec(op.seed, input, output),
+        }
     }
 
     pub fn matVecMulTransposed(op: *const ProjectionOperator, input: []const f32, output: []f32) void {
         const dim = op.dim;
         std.debug.assert(input.len == dim and output.len == dim);
-        matVecKernel(op.matrix_t, input, output, dim);
+        switch (op.kind) {
+            .dense => matVecKernel(op.matrix_t, input, output, dim),
+            .hadamard => hadamardMatVecTransposed(op.seed, input, output),
+        }
     }
 };
 
@@ -223,6 +312,11 @@ pub fn decodeAddInto(
 ) void {
     const dim = out.len;
     if (dim == 0) return;
+
+    if (projection.kind == .hadamard) {
+        hadamardDecodeAddInto(out, qjl_bits, gamma, projection.seed);
+        return;
+    }
 
     const scale = SQRT_PI_OVER_2 * gamma / @as(f32, @floatFromInt(dim));
     for (0..dim) |row| {
@@ -298,6 +392,20 @@ test "projection is deterministic" {
     defer p2.destroy(allocator);
 
     try std.testing.expectEqualSlices(f32, p1.matrix, p2.matrix);
+}
+
+test "power-of-two projection uses structured storage-free operator" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectEqual(@as(usize, 0), ProjectionOperator.requiredStorageSize(16));
+    try std.testing.expectEqual(@as(usize, 2 * 15 * 15 * @sizeOf(f32)), ProjectionOperator.requiredStorageSize(15));
+
+    var projection = try ProjectionOperator.prepare(allocator, 16, 12345);
+    defer projection.destroy(allocator);
+
+    try std.testing.expectEqual(ProjectionKind.hadamard, projection.kind);
+    try std.testing.expectEqual(@as(usize, 0), projection.matrix.len);
+    try std.testing.expectEqual(@as(usize, 0), projection.matrix_t.len);
 }
 
 test "encodeInto decodeInto roundtrip with gaussian projection" {

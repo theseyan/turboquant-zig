@@ -9,7 +9,8 @@ A Zig implementation of Google's TurboQuant vector compression library based on 
 - **Paper-aligned codec** - random rotation + Lloyd-Max scalar quantization + QJL residual
 - **Configurable bitwidth** - set `bits_per_dim` per engine instance
 - **Fast dot product** - Estimate inner products without full decode
-- **QJL** - Quantized Johnson-Lindenstrauss for unbiased inner product estimation
+- **QJL** - Quantized Johnson-Lindenstrauss for residual inner product estimation
+- **Structured projection** - Power-of-two dimensions use a storage-free Rademacher-Hadamard QJL projection
 - **SIMD optimized** - Uses Zig's portable `@Vector` for ARM64 NEON
 - **Engine-based API** - Precompute state for repeated operations
 
@@ -67,7 +68,32 @@ pub const Engine = struct {
 
 ![Performance](docs/assets/performance.png)
 
-At dim=1024: encode 2105µs, decode 1032µs, dot 997µs
+At dim=1024, the default power-of-two path avoids storing the QJL dense random matrix and uses a Rademacher-Hadamard projection instead. This preserves the residual sign-projection API while reducing QJL projection cost from dense matrix-vector work to a structured transform.
+
+### Structured QJL
+
+For power-of-two dimensions, the QJL residual projection uses a seeded Rademacher-Hadamard transform instead of a stored dense Gaussian matrix. Non-power-of-two dimensions keep the dense Gaussian fallback, so dimensions such as 384 and 1000 produce identical quality metrics to the dense implementation.
+
+Measured against the dense baseline with `N=1000`, `k=10`, `queries=50`, and `bits_per_dim=4`:
+
+| Config | Dense recall@10 | Structured recall@10 | Dense top1-in-top10 | Structured top1-in-top10 |
+|---|---:|---:|---:|---:|
+| 128d uniform | 0.774 | 0.850 | 0.980 | 1.000 |
+| 256d uniform | 0.730 | 0.826 | 0.960 | 1.000 |
+| 512d uniform | 0.726 | 0.848 | 1.000 | 1.000 |
+| 1024d uniform | 0.756 | 0.840 | 1.000 | 1.000 |
+| 512d gaussian | 0.412 | 0.664 | 0.860 | 0.980 |
+| 1024d gaussian | 0.352 | 0.508 | 0.760 | 0.820 |
+| 512d sparse | 0.790 | 0.858 | 1.000 | 1.000 |
+| 1024d sparse | 0.772 | 0.836 | 1.000 | 1.000 |
+
+Dedicated microbenchmarks show the main runtime gains in encode, decode, and one-off `dot`, where QJL projection work is on the hot path. Prepared per-vector scoring is roughly flat because `prepareQuery` already precomputes the query-side QJL projection.
+
+| Op | 128d dense -> structured | 512d dense -> structured | 1024d dense -> structured |
+|---|---:|---:|---:|
+| encode | 6534 -> 5882 ns | 47932 -> 34454 ns | 178499 -> 126821 ns |
+| decode | 1748 -> 1139 ns | 27262 -> 15968 ns | 119162 -> 58114 ns |
+| dot | 1433 -> 852 ns | 28152 -> 14817 ns | 106341 -> 56442 ns |
 
 ### Batch Search
 
@@ -104,9 +130,17 @@ zig build bench-engine -Doptimize=ReleaseFast -- prepared-dot 1024 10000 4
 
 TurboQuant reconstructs in the original basis and uses a separate QJL residual stage for dot estimation.
 
+For power-of-two dimensions, the residual stage uses a seeded Rademacher-Hadamard projection instead of a stored dense Gaussian matrix. Non-power-of-two dimensions keep the dense projection fallback. Validate any projection change with:
+
+```bash
+zig build quality -Doptimize=ReleaseFast -- 1024 1000 10 50 4
+zig build quality -Doptimize=ReleaseFast -- 1024 1000 10 50 4 gaussian
+zig build quality -Doptimize=ReleaseFast -- 1024 1000 10 50 4 sparse
+```
+
 ![Recall@k](docs/assets/recall-at-k.png)
 
-Run `zig build quality -- <dim> [N] [k] [num_queries] [bits_per_dim]` to measure top-k intersection recall and top-1-in-top-k for the current build.
+Run `zig build quality -- <dim> [N] [k] [num_queries] [bits_per_dim] [uniform|gaussian|sparse]` to measure top-k intersection recall and top-1-in-top-k for the current build.
 
 ![Component Analysis](docs/assets/component-analysis.png)
 
@@ -123,7 +157,7 @@ cd turboquant
 zig build test
 
 # Run quality benchmarks
-zig build quality -- <dim> [N] [k] [num_queries] [bits_per_dim]
+zig build quality -- <dim> [N] [k] [num_queries] [bits_per_dim] [uniform|gaussian|sparse]
 ```
 
 ## Binary Format

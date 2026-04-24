@@ -8,12 +8,19 @@ const QualityError = error{
     InvalidParam,
 };
 
+const Distribution = enum {
+    uniform,
+    gaussian,
+    sparse,
+};
+
 const Config = struct {
     dim: usize,
     n: usize,
     k: usize,
     num_queries: usize,
     bits_per_dim: u8,
+    distribution: Distribution,
     seed: u32,
 };
 
@@ -32,6 +39,7 @@ fn parseArgs(args: []const [:0]const u8) QualityError!Config {
     const k: usize = if (args.len > 3) std.fmt.parseInt(usize, std.mem.sliceTo(args[3], 0), 10) catch return QualityError.InvalidParam else 10;
     const num_queries: usize = if (args.len > 4) std.fmt.parseInt(usize, std.mem.sliceTo(args[4], 0), 10) catch return QualityError.InvalidParam else 50;
     const bits_per_dim: u8 = if (args.len > 5) std.fmt.parseInt(u8, std.mem.sliceTo(args[5], 0), 10) catch return QualityError.InvalidParam else 4;
+    const distribution: Distribution = if (args.len > 6) parseDistribution(std.mem.sliceTo(args[6], 0)) catch return QualityError.InvalidParam else .uniform;
 
     if (n == 0 or k == 0 or k > n or num_queries == 0 or bits_per_dim == 0 or bits_per_dim > 8) {
         return QualityError.InvalidParam;
@@ -43,8 +51,16 @@ fn parseArgs(args: []const [:0]const u8) QualityError!Config {
         .k = k,
         .num_queries = num_queries,
         .bits_per_dim = bits_per_dim,
+        .distribution = distribution,
         .seed = 42,
     };
+}
+
+fn parseDistribution(name: []const u8) QualityError!Distribution {
+    if (std.mem.eql(u8, name, "uniform")) return .uniform;
+    if (std.mem.eql(u8, name, "gaussian")) return .gaussian;
+    if (std.mem.eql(u8, name, "sparse")) return .sparse;
+    return QualityError.InvalidParam;
 }
 
 fn scoreDesc(_: void, a: IndexScore, b: IndexScore) bool {
@@ -72,15 +88,30 @@ fn top1InTopK(true_scores: []const IndexScore, est_scores: []const IndexScore, k
     return 0.0;
 }
 
-fn generateUnitSphere(allocator: std.mem.Allocator, dim: usize, rng: *std.Random.DefaultPrng) ![]f32 {
+fn randGaussian(random: std.Random) f32 {
+    const v1 = @max(random.float(f32), std.math.floatMin(f32));
+    const v2 = random.float(f32);
+    return @sqrt(-2.0 * @log(v1)) * @cos(2.0 * std.math.pi * v2);
+}
+
+fn generateUnitSphere(allocator: std.mem.Allocator, dim: usize, rng: *std.Random.DefaultPrng, distribution: Distribution) ![]f32 {
     const vec = try allocator.alloc(f32, dim);
     errdefer allocator.free(vec);
 
     const random = rng.random();
     var norm_sq: f32 = 0;
-    for (vec) |*value| {
-        value.* = random.float(f32) * 2 - 1;
+    for (vec, 0..) |*value, i| {
+        value.* = switch (distribution) {
+            .uniform => random.float(f32) * 2 - 1,
+            .gaussian => randGaussian(random),
+            .sparse => if (random.float(f32) < 0.1) random.float(f32) * 2 - 1 else 0,
+        };
         norm_sq += value.* * value.*;
+
+        if (distribution == .sparse and i + 1 == dim and norm_sq == 0) {
+            value.* = 1;
+            norm_sq = 1;
+        }
     }
 
     const inv_norm = 1.0 / @sqrt(norm_sq);
@@ -103,7 +134,7 @@ pub fn main() void {
     const config = parseArgs(args) catch |err| {
         switch (err) {
             QualityError.MissingArgs => {
-                std.debug.print("Usage: quality <dim> [N] [k] [num_queries] [bits_per_dim]\n", .{});
+                std.debug.print("Usage: quality <dim> [N] [k] [num_queries] [bits_per_dim] [uniform|gaussian|sparse]\n", .{});
             },
             QualityError.InvalidDim => std.debug.print("error: invalid dimension\n", .{}),
             QualityError.InvalidParam => std.debug.print("error: invalid parameter\n", .{}),
@@ -130,7 +161,7 @@ pub fn main() void {
     var db_rng = std.Random.DefaultPrng.init(config.seed);
     var encode_timer = std.time.Timer.start() catch unreachable;
     for (0..config.n) |i| {
-        db_vecs[i] = generateUnitSphere(allocator, config.dim, &db_rng) catch unreachable;
+        db_vecs[i] = generateUnitSphere(allocator, config.dim, &db_rng, config.distribution) catch unreachable;
         db_compressed[i] = engine.encode(allocator, db_vecs[i]) catch unreachable;
     }
     const encode_ns = encode_timer.read();
@@ -148,7 +179,7 @@ pub fn main() void {
 
     var query_rng = std.Random.DefaultPrng.init(config.seed + 1000);
     for (0..config.num_queries) |_| {
-        const q = generateUnitSphere(allocator, config.dim, &query_rng) catch unreachable;
+        const q = generateUnitSphere(allocator, config.dim, &query_rng, config.distribution) catch unreachable;
         var prepared_query = engine.prepareQuery(allocator, q) catch unreachable;
 
         for (0..config.n) |i| {
@@ -196,7 +227,7 @@ pub fn main() void {
     const query_ms = @as(f64, @floatFromInt(query_ns_total)) / 1_000_000.0;
 
     std.debug.print("=== QUALITY ===\n", .{});
-    std.debug.print("dim={}, N={}, queries={}, bits/dim≈{d:.3}\n", .{ config.dim, config.n, config.num_queries, total_payload_bits });
+    std.debug.print("dim={}, N={}, queries={}, bits/dim≈{d:.3}, distribution={s}\n", .{ config.dim, config.n, config.num_queries, total_payload_bits, @tagName(config.distribution) });
     std.debug.print("encode total: {d:.1}ms ({d:.1}us/vec)\n", .{ encode_ms, encode_ms * 1000.0 / @as(f64, @floatFromInt(config.n)) });
     std.debug.print("query total:  {d:.1}ms ({d:.1}us/query)\n", .{ query_ms, query_ms * 1000.0 / nq });
     std.debug.print("recall@{}:    {d:.4}\n", .{ config.k, recall });
@@ -219,6 +250,20 @@ test "parseArgs rejects invalid benchmark params" {
 
     const invalid_bits = [_][:0]const u8{ "quality", "128", "100", "10", "50", "9" };
     try std.testing.expectError(QualityError.InvalidParam, parseArgs(&invalid_bits));
+
+    const invalid_distribution = [_][:0]const u8{ "quality", "128", "100", "10", "50", "4", "bad" };
+    try std.testing.expectError(QualityError.InvalidParam, parseArgs(&invalid_distribution));
+}
+
+test "parseArgs accepts vector distributions" {
+    const uniform = [_][:0]const u8{ "quality", "128", "100", "10", "50", "4", "uniform" };
+    try std.testing.expectEqual(Distribution.uniform, (try parseArgs(&uniform)).distribution);
+
+    const gaussian = [_][:0]const u8{ "quality", "128", "100", "10", "50", "4", "gaussian" };
+    try std.testing.expectEqual(Distribution.gaussian, (try parseArgs(&gaussian)).distribution);
+
+    const sparse = [_][:0]const u8{ "quality", "128", "100", "10", "50", "4", "sparse" };
+    try std.testing.expectEqual(Distribution.sparse, (try parseArgs(&sparse)).distribution);
 }
 
 test "recallAtK measures top-k intersection" {
