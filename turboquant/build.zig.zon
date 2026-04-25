@@ -1,8 +1,8 @@
 .{
     .name = .turboquant,
-    .version = "0.1.0",
-    .fingerprint = 0xd0b2766a0c2e7a37,
-    .minimum_zig_version = "0.15.2",
+    .version = "0.2.0",
+    .fingerprint = 0xd0b2766a9b5cb04b,
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",

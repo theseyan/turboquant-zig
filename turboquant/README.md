@@ -11,14 +11,14 @@ Add to your `build.zig.zon`:
     .name = "your-project",
     .dependencies = .{
         .turboquant = .{
-            .url = "https://github.com/botirk38/turboquant/archive/refs/tags/v0.1.0.tar.gz",
-            .hash = "sha256-...",
+            .url = "https://github.com/theseyan/turboquant-zig/archive/refs/tags/v0.2.0.tar.gz",
+            .hash = "...",
         },
     },
 }
 ```
 
-To get the hash, run `zig fetch --save https://github.com/botirk38/turboquant/archive/refs/tags/v0.1.0.tar.gz` after adding the URL, and Zig will provide the correct hash.
+To get the hash, run `zig fetch --save https://github.com/theseyan/turboquant-zig/archive/refs/tags/v0.2.0.tar.gz` after adding the URL, and Zig will provide the correct hash.
 
 Or use the latest version from the main branch:
 
@@ -27,8 +27,8 @@ Or use the latest version from the main branch:
     .name = "your-project",
     .dependencies = .{
         .turboquant = .{
-            .url = "https://github.com/botirk38/turboquant/archive/refs/heads/master.tar.gz",
-            .hash = "sha256-...",
+            .url = "https://github.com/theseyan/turboquant-zig/archive/refs/heads/main.tar.gz",
+            .hash = "...",
         },
     },
 }

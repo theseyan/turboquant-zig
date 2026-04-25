@@ -26,7 +26,7 @@ const Config = struct {
     seed: u32,
 };
 
-fn parseArgs(args: []const [:0]u8) BenchError!Config {
+fn parseArgs(args: []const [:0]const u8) BenchError!Config {
     if (args.len < 2) return BenchError.MissingArgs;
 
     const op_str = std.mem.sliceTo(args[1], 0);
@@ -70,7 +70,15 @@ fn generateVector(allocator: std.mem.Allocator, dim: usize, seed: u32) ![]f32 {
     return data;
 }
 
-fn runEncode(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
+fn now(io: std.Io) std.Io.Timestamp {
+    return std.Io.Clock.awake.now(io);
+}
+
+fn elapsedSince(io: std.Io, start: std.Io.Timestamp) u64 {
+    return @intCast(@max(start.durationTo(now(io)).nanoseconds, 0));
+}
+
+fn runEncode(allocator: std.mem.Allocator, io: std.Io, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
     var engine = try turboquant.Engine.init(allocator, .{ .dim = dim, .seed = seed, .bits_per_dim = bits_per_dim });
     defer engine.deinit(allocator);
 
@@ -82,14 +90,14 @@ fn runEncode(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_p
 
     var total_ns: u64 = 0;
     for (0..iterations) |_| {
-        var timer = try std.time.Timer.start();
+        const start = now(io);
         try engine.encodeInto(out, data);
-        total_ns += timer.read();
+        total_ns += elapsedSince(io, start);
     }
     return total_ns / iterations;
 }
 
-fn runDecode(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
+fn runDecode(allocator: std.mem.Allocator, io: std.Io, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
     var engine = try turboquant.Engine.init(allocator, .{ .dim = dim, .seed = seed, .bits_per_dim = bits_per_dim });
     defer engine.deinit(allocator);
 
@@ -105,14 +113,14 @@ fn runDecode(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_p
 
     var total_ns: u64 = 0;
     for (0..iterations) |_| {
-        var timer = try std.time.Timer.start();
+        const start = now(io);
         try engine.decodeInto(decoded, compressed);
-        total_ns += timer.read();
+        total_ns += elapsedSince(io, start);
     }
     return total_ns / iterations;
 }
 
-fn runDot(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
+fn runDot(allocator: std.mem.Allocator, io: std.Io, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
     var engine = try turboquant.Engine.init(allocator, .{ .dim = dim, .seed = seed, .bits_per_dim = bits_per_dim });
     defer engine.deinit(allocator);
 
@@ -128,14 +136,14 @@ fn runDot(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_per_
 
     var total_ns: u64 = 0;
     for (0..iterations) |_| {
-        var timer = try std.time.Timer.start();
+        const start = now(io);
         _ = engine.dot(query, compressed);
-        total_ns += timer.read();
+        total_ns += elapsedSince(io, start);
     }
     return total_ns / iterations;
 }
 
-fn runPreparedDot(allocator: std.mem.Allocator, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
+fn runPreparedDot(allocator: std.mem.Allocator, io: std.Io, dim: usize, iterations: usize, bits_per_dim: u8, seed: u32) !u64 {
     var engine = try turboquant.Engine.init(allocator, .{ .dim = dim, .seed = seed, .bits_per_dim = bits_per_dim });
     defer engine.deinit(allocator);
 
@@ -154,9 +162,9 @@ fn runPreparedDot(allocator: std.mem.Allocator, dim: usize, iterations: usize, b
 
     var total_ns: u64 = 0;
     for (0..iterations) |_| {
-        var timer = try std.time.Timer.start();
+        const start = now(io);
         _ = engine.dotPrepared(prepared, compressed);
-        total_ns += timer.read();
+        total_ns += elapsedSince(io, start);
     }
     return total_ns / iterations;
 }
@@ -178,13 +186,12 @@ fn runCompression(allocator: std.mem.Allocator, dim: usize, bits_per_dim: u8, se
     std.debug.print("{d} | {d} | {d:.2}x | {d:.2}\n", .{ dim, compressed.len, ratio, bits });
 }
 
-pub fn main() void {
-    const allocator = std.heap.page_allocator;
-    const args = std.process.argsAlloc(allocator) catch {
+pub fn main(init: std.process.Init) void {
+    const allocator = init.arena.allocator();
+    const args = init.minimal.args.toSlice(allocator) catch {
         std.debug.print("error: out of memory parsing args\n", .{});
         return;
     };
-    defer std.process.argsFree(allocator, args);
 
     const config = parseArgs(args) catch |err| {
         switch (err) {
@@ -202,28 +209,28 @@ pub fn main() void {
 
     switch (config.op) {
         .encode => {
-            const ns = runEncode(allocator, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
+            const ns = runEncode(allocator, init.io, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
                 std.debug.print("error: benchmark failed\n", .{});
                 return;
             };
             std.debug.print("encode/dim={d}/bpd={d}: {d} ns/op\n", .{ config.dim, config.bits_per_dim, ns });
         },
         .decode => {
-            const ns = runDecode(allocator, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
+            const ns = runDecode(allocator, init.io, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
                 std.debug.print("error: benchmark failed\n", .{});
                 return;
             };
             std.debug.print("decode/dim={d}/bpd={d}: {d} ns/op\n", .{ config.dim, config.bits_per_dim, ns });
         },
         .dot => {
-            const ns = runDot(allocator, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
+            const ns = runDot(allocator, init.io, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
                 std.debug.print("error: benchmark failed\n", .{});
                 return;
             };
             std.debug.print("dot/dim={d}/bpd={d}: {d} ns/op\n", .{ config.dim, config.bits_per_dim, ns });
         },
         .prepared_dot => {
-            const ns = runPreparedDot(allocator, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
+            const ns = runPreparedDot(allocator, init.io, config.dim, config.iterations, config.bits_per_dim, config.seed) catch {
                 std.debug.print("error: benchmark failed\n", .{});
                 return;
             };
@@ -248,7 +255,7 @@ pub fn main() void {
             std.debug.print("{s:>4} | {s:>12}\n", .{ "dim", "ns/op" });
             std.debug.print("------|------------\n", .{});
             for (dims) |dim| {
-                const ns = runEncode(allocator, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
+                const ns = runEncode(allocator, init.io, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
                 std.debug.print("{d:>4} | {d:>12}\n", .{ dim, ns });
             }
 
@@ -256,7 +263,7 @@ pub fn main() void {
             std.debug.print("{s:>4} | {s:>12}\n", .{ "dim", "ns/op" });
             std.debug.print("------|------------\n", .{});
             for (dims) |dim| {
-                const ns = runDecode(allocator, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
+                const ns = runDecode(allocator, init.io, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
                 std.debug.print("{d:>4} | {d:>12}\n", .{ dim, ns });
             }
 
@@ -264,7 +271,7 @@ pub fn main() void {
             std.debug.print("{s:>4} | {s:>12}\n", .{ "dim", "ns/op" });
             std.debug.print("------|------------\n", .{});
             for (dims) |dim| {
-                const ns = runDot(allocator, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
+                const ns = runDot(allocator, init.io, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
                 std.debug.print("{d:>4} | {d:>12}\n", .{ dim, ns });
             }
 
@@ -272,7 +279,7 @@ pub fn main() void {
             std.debug.print("{s:>4} | {s:>12}\n", .{ "dim", "ns/op" });
             std.debug.print("------|------------\n", .{});
             for (dims) |dim| {
-                const ns = runPreparedDot(allocator, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
+                const ns = runPreparedDot(allocator, init.io, dim, config.iterations, config.bits_per_dim, config.seed) catch continue;
                 std.debug.print("{d:>4} | {d:>12}\n", .{ dim, ns });
             }
 

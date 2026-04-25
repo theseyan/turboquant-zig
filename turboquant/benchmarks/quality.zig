@@ -122,14 +122,21 @@ fn generateUnitSphere(allocator: std.mem.Allocator, dim: usize, rng: *std.Random
     return vec;
 }
 
-pub fn main() void {
-    const allocator = std.heap.page_allocator;
+fn now(io: std.Io) std.Io.Timestamp {
+    return std.Io.Clock.awake.now(io);
+}
 
-    const args = std.process.argsAlloc(allocator) catch {
+fn elapsedSince(io: std.Io, start: std.Io.Timestamp) u64 {
+    return @intCast(@max(start.durationTo(now(io)).nanoseconds, 0));
+}
+
+pub fn main(init: std.process.Init) void {
+    const allocator = init.arena.allocator();
+
+    const args = init.minimal.args.toSlice(allocator) catch {
         std.debug.print("error: out of memory\n", .{});
         return;
     };
-    defer std.process.argsFree(allocator, args);
 
     const config = parseArgs(args) catch |err| {
         switch (err) {
@@ -159,12 +166,12 @@ pub fn main() void {
     defer allocator.free(db_compressed);
 
     var db_rng = std.Random.DefaultPrng.init(config.seed);
-    var encode_timer = std.time.Timer.start() catch unreachable;
+    const encode_start = now(init.io);
     for (0..config.n) |i| {
         db_vecs[i] = generateUnitSphere(allocator, config.dim, &db_rng, config.distribution) catch unreachable;
         db_compressed[i] = engine.encode(allocator, db_vecs[i]) catch unreachable;
     }
-    const encode_ns = encode_timer.read();
+    const encode_ns = elapsedSince(init.io, encode_start);
 
     const true_scores = allocator.alloc(IndexScore, config.n) catch unreachable;
     defer allocator.free(true_scores);
@@ -189,7 +196,7 @@ pub fn main() void {
             };
         }
 
-        var timer = std.time.Timer.start() catch unreachable;
+        const query_start = now(init.io);
         for (0..config.n) |i| {
             est_scores[i] = .{
                 .idx = i,
@@ -197,7 +204,7 @@ pub fn main() void {
             };
             total_abs_dot_error += @abs(@as(f64, true_scores[i].score) - @as(f64, est_scores[i].score));
         }
-        query_ns_total += timer.read();
+        query_ns_total += elapsedSince(init.io, query_start);
 
         std.mem.sort(IndexScore, true_scores, {}, scoreDesc);
         std.mem.sort(IndexScore, est_scores, {}, scoreDesc);
