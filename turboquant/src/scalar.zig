@@ -105,6 +105,14 @@ pub fn encodeInto(
 
     if (codebook.bits == 0) return;
 
+    if (codebook.bits == 3) {
+        for (values, 0..) |value, i| {
+            const idx = quantizeIndex(codebook, value, coord_scale);
+            write3Bits(out, i, idx);
+        }
+        return;
+    }
+
     var bit_pos: usize = 0;
     for (values) |value| {
         const idx = quantizeIndex(codebook, value, coord_scale);
@@ -128,6 +136,15 @@ pub fn encodeIntoDecoded(
 
     if (codebook.bits == 0) {
         @memset(decoded[0..values.len], 0);
+        return;
+    }
+
+    if (codebook.bits == 3) {
+        for (values, decoded[0..values.len], 0..) |value, *dst, i| {
+            const idx = quantizeIndex(codebook, value, coord_scale);
+            write3Bits(out, i, idx);
+            dst.* = codebook.centroids[idx] * coord_scale;
+        }
         return;
     }
 
@@ -155,6 +172,14 @@ pub fn decodeInto(
         return;
     }
 
+    if (codebook.bits == 3) {
+        for (out, 0..) |*value, i| {
+            const idx = read3Bits(compressed, i);
+            value.* = codebook.centroids[idx] * coord_scale;
+        }
+        return;
+    }
+
     var bit_pos: usize = 0;
     for (out) |*value| {
         const idx = readBits(compressed, &bit_pos, codebook.bits);
@@ -174,6 +199,15 @@ pub fn dotProduct(
     if (compressed.len < expected_len) return ScalarError.InvalidDimension;
 
     if (codebook.bits == 0) return 0;
+
+    if (codebook.bits == 3) {
+        var sum: f32 = 0;
+        for (q, 0..) |qv, i| {
+            const idx = read3Bits(compressed, i);
+            sum += qv * (codebook.centroids[idx] * coord_scale);
+        }
+        return sum;
+    }
 
     var sum: f32 = 0;
     var bit_pos: usize = 0;
@@ -216,6 +250,28 @@ fn writeBits(out: []u8, bit_pos: *usize, value: usize, bits: u8) void {
         current >>= @intCast(take);
         bit_pos.* += take;
         remaining -= take;
+    }
+}
+
+fn read3Bits(data: []const u8, index: usize) usize {
+    const bit_pos = index * 3;
+    const byte_idx = bit_pos / 8;
+    const bit_offset: u3 = @intCast(bit_pos % 8);
+    var word: u16 = data[byte_idx];
+    if (byte_idx + 1 < data.len) {
+        word |= @as(u16, data[byte_idx + 1]) << 8;
+    }
+    return @intCast((word >> bit_offset) & 0x7);
+}
+
+fn write3Bits(out: []u8, index: usize, value: usize) void {
+    const bit_pos = index * 3;
+    const byte_idx = bit_pos / 8;
+    const bit_offset: u4 = @intCast(bit_pos % 8);
+    const shifted = @as(u16, @intCast(value & 0x7)) << bit_offset;
+    out[byte_idx] |= @intCast(shifted & 0xFF);
+    if (bit_offset > 5 and byte_idx + 1 < out.len) {
+        out[byte_idx + 1] |= @intCast(shifted >> 8);
     }
 }
 
