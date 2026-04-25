@@ -1,8 +1,8 @@
 # TurboQuant
 
-[![Star History Chart](https://api.star-history.com/image?repos=botirk38/turboquant&type=Date)](https://star-history.com/#botirk38/turboquant)
-
 A Zig implementation of Google's TurboQuant vector compression library based on the paper "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate".
+
+Based on [botirk38/turboquant](https://github.com/botirk38/turboquant) with many improvements.
 
 ## Features
 
@@ -109,7 +109,7 @@ while (try cursor.next()) |compressed_vector| {
 }
 ```
 
-This avoids recomputing the query rotation and QJL projection for every stored vector. It is the intended path for RAG candidate scoring, LMDB/RocksDB-backed scans, and reranking batches returned by another index. The regular `dot` API remains useful for scoring a single compressed vector.
+This avoids recomputing the query rotation and QJL projection for every stored vector. It is the intended path for RAG candidate scoring, and reranking batches returned by another index. The regular `dot` API remains useful for scoring a single compressed vector.
 
 Benchmark support:
 
